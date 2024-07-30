@@ -1,0 +1,282 @@
+---
+title: "Untitled"
+author: "Andrea Cocco, Andrea Quartuccio, Luca Varotto"
+date: "2024-05-20"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(collapse = TRUE)
+knitr::opts_chunk$set(fig.path = "figures/") #per salvare le immagini
+```
+
+# Intro
+
+```{r Caricamento dati e libreria, include=FALSE}
+rm(list=ls())
+#load("unipd_courses_vFinale.Rdata")
+load(file.choose()) #caricare "unipd_courses_vFinale.Rdata"
+nrow(dat)
+library(tm)
+library(tidymodels)
+library(tidyverse)
+library(rpart)
+library(rpart.plot)
+library(ngram)
+library(patchwork)
+library(ggfortify)
+
+unique(dat$School)
+
+dat <- dat %>% mutate(School = recode(School,"Scuola di Scienze umane, sociali e del patrimonio culturale" = "Scuola di S.U.S.P.C."))
+
+table(dat$School)
+```
+
+# Creazione DTM
+
+```{r}
+corpus <- VectorSource(dat$full.text) %>% Corpus
+
+dtm <- DocumentTermMatrix(corpus, control = list(removeNumbers = FALSE
+      #,weighting = function(x) weightTfIdf(x, normalize = TRUE) #commentare questa riga per avere il semplice TF
+                          )) %>%
+  removeSparseTerms(0.999) %>% as.matrix %>% as.data.frame()
+
+
+dtm$Degree <- as.factor(dat$Degree)
+dtm$School <- as.factor(dat$School)
+```
+
+# PCA
+
+```{r}
+dtm_grouped_by_degree <- dtm %>% 
+  group_by(Degree, School) %>% 
+  summarise_all(sum)
+
+pca_s <- prcomp(dtm_grouped_by_degree[,-c(1,2)], scale. = TRUE)
+
+s_12<- autoplot(pca_s, data = dtm_grouped_by_degree, colour = "School", main = "PCA sui dati standardizzati", label=T, cex=3)
+
+s_23 <- autoplot(pca_s,x =2, y = 3 ,colour = 'School', data = dtm_grouped_by_degree, size=3) +
+  ggtitle("PCA sui dati standardizzati") +
+  theme(
+    plot.title = element_text(size = 20),   # Increase title size
+    axis.title = element_text(size = 15),   # Increase axis titles size
+    axis.text = element_text(size = 12),    # Increase axis text size
+    legend.text = element_text(size = 12),  # Increase legend text size
+    legend.title = element_text(size = 15),  # Increase legend title size
+    legend.position="bottom")
+
+s_34<- autoplot(pca_s,x =3, y = 4 ,colour = 'School', data = dtm_grouped_by_degree,  main = "PCA sui dati standardizati", label=T, cex=3)
+
+pca_ns <- prcomp(dtm_grouped_by_degree[,-c(1,2)], scale. = FALSE)
+ns_12 <- autoplot(pca_ns, colour = 'School', data = dtm_grouped_by_degree, main = "Non Scalato", label=T)
+
+ns_23 <- autoplot(pca_ns,x =2, y = 3 ,colour = 'School', data = dtm_grouped_by_degree,  main = "Non Scalato", label=T)
+ns_34 <- autoplot(pca_ns,x =3, y = 4 ,colour = 'School', data = dtm_grouped_by_degree,  main = "Non Scalato", label=T)
+
+#s_12
+#ns_12
+
+s_23
+ns_23
+
+#s_34
+#ns_34
+```
+
+# t-SNE
+
+```{r}
+library(Rtsne)
+set.seed(123)
+tsne_dtm <- dtm_grouped_by_degree[,-c(1,2)] %>% Rtsne(dims = 2, perplexity=8, max_iter = 1000)
+
+tsne_df <- data.frame("X"=tsne_dtm$Y[,1], "Y"=tsne_dtm$Y[,2], "School"=dtm_grouped_by_degree$School, ID=as.character(1:nrow(dtm_grouped_by_degree)))
+
+set.seed(123)
+x11()
+ggplot(tsne_df, aes(x = X, y = Y, color = School)) + 
+  geom_point(show.legend = TRUE, size=3) +
+  theme_minimal() +
+  labs(title = "t-SNE Plot with Text Labels") +
+  theme(legend.position="bottom")
+```
+
+# Addattamento dei modelli
+
+DI seguito vengono adattati dei modelli per i contenuti
+
+```{r}
+dtm <- dtm %>% mutate(Degree=NULL)
+
+set.seed(123)
+split <- initial_split(dtm, strata=School)
+train <- training(split)
+test  <- testing(split)
+split
+```
+
+
+## Alberi di classificazione
+
+```{r CART}
+t1 <- rpart(School ~ ., data = train, method= "class", control = rpart.control(minbucket = 10, cp = .002, xval = 10))
+#rpart.plot(t1, type=0)
+
+pred_t1 <- predict(t1, newdata = test, type = "class")
+conf1 <- table(Predicted = pred_t1, Actual = test$School)
+View(prop.table(conf1,2))
+
+# sulle righe i veri valori
+# sulle colonne i fittati
+#t
+#(t / rowSums(t))
+
+acc1 <- sum(diag(conf1))/length(pred_t1)
+acc1
+```
+
+### Potatura
+
+
+```{r CART}
+plotcp(t1)
+
+t2 <- prune(t1, cp= t1$cptable[6,1])
+x11()
+rpart.plot(t2, fallen.leaves = FALSE)
+
+pred_t2 <- predict(t2, newdata = test, type = "class")
+conf2 <- table(Predicted = pred_t2, Actual = test$School)
+
+View(prop.table(conf2, 2))
+
+acc2 <- sum(diag(conf2))/length(pred_t2)
+acc2
+
+library(rattle)
+fancyRpartPlot(t2)
+```
+
+## LDA
+
+```{r LDA_1}
+library(lda)
+set.seed(123)
+N <- nrow(dat)
+N
+K <- 10
+K
+I <- 3*1e+3
+
+corpus <- lexicalize(dat$full.text, sep = " ")
+head(corpus$vocab)
+n_voc <- word.counts(corpus$documents, corpus$vocab)
+hist(n_voc, breaks = 100)
+data.frame(v=corpus$vocab,n=n_voc) %>% arrange(-n)
+# il primo è un outlier?
+plot(ecdf(n_voc))
+
+mean(n_voc==1)
+mean(n_voc<=15)
+```
+
+Teniamo la parola nel vocabolario se appare almeno 15 volte. Impostiamo come max 4300 per togliere l'outlier.
+
+```{r LDA_2, eval=FALSE, include=FALSE}
+to_keep_voc <- corpus$vocab[ n_voc >= 15 & n_voc <4300 ]
+corpus <- lexicalize(dat$full.text,
+                     vocab=to_keep_voc)
+
+set.seed(12345)
+result <- lda.collapsed.gibbs.sampler(
+  documents = corpus,
+  K = K,
+  vocab = to_keep_voc,
+  num.iterations = I,
+  alpha = 0.1,
+  eta = 0.1,
+  burnin = 100,
+  compute.log.likelihood = TRUE
+)
+
+matplot(t(result$log.likelihoods),type="l")
+```
+
+Guardando le top parole scegliamo i titoli dei topic
+
+```{r LDA_2, eval=FALSE, include=FALSE}
+top_words <- top.topic.words(result$topics, num.words = 6, by.score = TRUE)
+top_words
+
+topic_names <- c("Chimica", "Medicina", "Matematica", "Diritto", "Biologia", "Agraria", "Economia", "Storia&Letteratura", "Fisica", "Pedagogia")
+```
+
+ID dei documenti "top" per ogni topic.
+
+```{r LDA_2, eval=FALSE, include=FALSE}
+top_docs <- top.topic.documents(result$document_sums, num.documents = 6, alpha = 0.1)
+
+dat$full.text[top_docs[,1]]
+
+dat[top_docs[,6],]
+```
+
+Vediamo per 10 u.s. casuali quali sono maggiore frequenza
+
+```{r LDA_3, eval=FALSE, include=FALSE}
+topic.proportions <- t(result$document_sums) / colSums(result$document_sums)
+set.seed(123)
+samp <- sample(1:N, 10)
+topic.proportions <- topic.proportions[samp, ]
+
+dim(topic.proportions)
+
+colnames(topic.proportions) <- topic_names
+
+topic.proportions.df <- reshape2::melt(
+  cbind(data.frame(topic.proportions), document = factor(samp)),
+  variable.name = "topic",
+  id.vars = "document"
+)
+
+ggplot(topic.proportions.df, aes(y = topic, x = value), ylab = "proportion") +
+  geom_bar(stat = "identity") +
+  facet_wrap( ~ document, ncol = 5)
+```
+
+# DTM piccola
+
+```{r}
+set.seed(123)
+corpus <- VectorSource(dat$full.text) %>% Corpus
+dtm_small <- DocumentTermMatrix(corpus, control = list(removeNumbers = FALSE)) %>% removeSparseTerms(0.975) %>% as.matrix() %>% as.data.frame()
+
+dtm_small$School <- as.factor(dat$School)
+
+set.seed(123)
+split_small <- initial_split(dtm_small, strata=School)
+train_small <- training(split_small)
+test_small <- testing(split_small)
+split_small
+```
+
+## Rete Neurale
+
+```{r NN, eval=FALSE, include=FALSE}
+library(nnet)
+set.seed(12421)
+
+nn1 <- nnet(School ~ ., data = train, size = 100, 
+            entropy =TRUE,  decay = .1,
+            MaxNWts = 1000000, maxit = 100)
+pred_nn1 <- predict(nn1, newdata = test, type = "class")
+conf <- table(test$School, pred_nn1)
+conf
+
+acc <- sum(diag(conf))/length(pred_nn1)
+acc
+```

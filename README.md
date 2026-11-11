@@ -57,14 +57,14 @@ Text_mining_unipd_courses/
 │   └── unipd_courses_vFinale.Rdata   # after stage 3, input of the models
 ├── Figures/                          # wordclouds, histograms, PCA, t-SNE, LDA, CV error
 ├── Report/
-│   ├── Cocco-Quartuccio-Varotto.pdf  # the report (Italian)
-│   ├── Cocco-Quartuccio-Varotto.tex  # its LaTeX source
-│   ├── tau-book.cls                  # tau-book template, CC BY 4.0
-│   ├── tau.sty                       #   "
-│   └── tau-book-cls-READMe.md        # template documentation and attribution
+│   └── Cocco-Quartuccio-Varotto.pdf  # the report (Italian)
 ├── .gitignore
 └── README.md
 ```
+
+The LaTeX source of the report, the *tau-book* template files and the build
+output live in the local working folder but stay out of the repository, see
+`.gitignore`: of the report, only the compiled PDF is published here.
 
 The raw dataset has six columns — `School`, `Degree`, `Course`, the two
 syllabus fields and the source `URL` — and covers **8 Schools, 81 Bachelor's
@@ -127,4 +127,4 @@ Statistics for Technology and Science, University of Padua. Report written for
 the *Metodi Statistici per i Big Data* exam, May 2024.
 
 The report is typeset with the *tau-book* template by Guillermo Jimenez,
-distributed under CC BY 4.0; see `Report/tau-book-cls-READMe.md`.
+distributed under CC BY 4.0.

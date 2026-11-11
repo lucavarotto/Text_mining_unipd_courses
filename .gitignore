@@ -3,3 +3,22 @@ Report/outputTeX/
 *.synctex.gz
 .Rhistory
 Figures/*.png
+
+# Sorgenti del report: su GitHub ne resta solo il PDF
+*.tex
+*.cls
+*.sty
+*.bib
+*.bbl
+*.blg
+*.aux
+*.bcf
+*.fdb_latexmk
+*.fls
+*.lof
+*.lot
+*.log
+*.out
+*.run.xml
+*.toc
+Report/*.md

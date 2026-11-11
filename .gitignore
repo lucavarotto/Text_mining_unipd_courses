@@ -1,0 +1,5 @@
+_originali/
+Report/outputTeX/
+*.synctex.gz
+.Rhistory
+Figures/*.png

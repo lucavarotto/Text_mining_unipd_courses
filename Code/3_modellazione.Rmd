@@ -1,0 +1,489 @@
+---
+title: "Untitled"
+author: "Andrea Cocco, Andrea Quartuccio, Luca Varotto"
+date: "2024-05-20"
+output: html_document
+---
+<!--
+  3_MODELLAZIONE.RMD
+
+  Terzo e ultimo stadio della pipeline: dal corpus definitivo ai modelli che
+  prevedono la Scuola di un insegnamento a partire dal testo del Syllabus.
+
+  Input: ../Datasets/unipd_courses_vFinale.Rdata (2092 u.s.), prodotto da
+  2_analisi_lessicale_ed_esplorativa.R.
+
+  Percorso del documento:
+    1. document-term matrix pesata con normalized TF-IDF;
+    2. rappresentazione dei dati aggregati per corso di laurea, con PCA,
+       clustering gerarchico e t-SNE;
+    3. topic modelling con Latent Dirichlet Allocation, 10 topic;
+    4. modelli di classificazione: albero CART, analisi discriminante lineare
+       e rete neurale a un layer, su una DTM piu' piccola.
+
+  Diversi chunk hanno eval=FALSE e include=FALSE: sono le parti esplorative o
+  costose (il campionatore di Gibbs, la rete neurale) che non vengono rieseguite
+  ad ogni knit. Per rifarle girare basta togliere quelle opzioni.
+-->
+
+```{r setup, include=FALSE}
+# collapse accorpa codice e output nello stesso blocco; fig.path dice a knitr
+# dove salvare le immagini dei chunk, qui la cartella Figures/ del progetto
+knitr::opts_chunk$set(collapse = TRUE)
+knitr::opts_chunk$set(fig.path = "../Figures/") #per salvare le immagini
+```
+
+# Intro
+
+Si carica il corpus definitivo e le librerie usate in tutto il documento:
+`tm` per la document-term matrix, `tidymodels` per lo split dei dati, `rpart`
+e `rpart.plot` per gli alberi, `ggfortify` e `patchwork` per i grafici.
+```{r Caricamento dati e libreria, include=FALSE}
+rm(list=ls())
+load("../Datasets/unipd_courses_vFinale.Rdata")
+nrow(dat)
+library(tm)
+library(tidymodels)
+library(tidyverse)
+library(rpart)
+library(rpart.plot)
+library(ngram)
+library(patchwork)
+library(ggfortify)
+
+unique(dat$School)
+
+# il nome della Scuola di Scienze umane, sociali e del patrimonio culturale e'
+# troppo lungo per le legende dei grafici: viene abbreviato in S.U.S.P.C.
+dat <- dat %>% mutate(School = recode(School,"Scuola di Scienze umane, sociali e del patrimonio culturale" = "Scuola di S.U.S.P.C."))
+
+table(dat$School)
+```
+
+# Creazione DTM
+
+La document-term matrix conta quante volte ogni termine compare in ogni
+documento. Il peso usato qui e' il *normalized TF-IDF*: la frequenza del
+termine nel documento, divisa per la lunghezza del documento e moltiplicata
+per il logaritmo dell'inverso della quota di documenti che lo contengono. In
+questo modo un termine che compare in tutti i programmi pesa poco, mentre uno
+concentrato in pochi insegnamenti pesa molto.
+
+`removeSparseTerms(0.999)` scarta i termini assenti in oltre il 99.9% dei
+documenti, che altrimenti renderebbero la matrice ingestibile.
+```{r}
+corpus <- VectorSource(dat$full.text) %>% Corpus
+
+dtm <- DocumentTermMatrix(corpus, control = list(removeNumbers = FALSE, weighting = function(x) weightTfIdf(x, normalize = TRUE))) %>% removeSparseTerms(0.999) %>% as.matrix %>% as.data.frame()
+
+#
+
+# alla matrice si affiancano le due variabili di raggruppamento: il corso di
+# laurea, usato per aggregare nelle rappresentazioni, e la Scuola, che e' la
+# variabile da prevedere
+dtm$Degree <- as.factor(dat$Degree)
+dtm$School <- as.factor(dat$School)
+```
+
+# PCA
+
+Per capire se il testo separa le Scuole, conviene guardare i dati aggregati
+per corso di laurea: 81 punti invece di 2092, molto piu' leggibili. Si
+confrontano le componenti principali sui dati standardizzati (`scale. = TRUE`)
+e non standardizzati, sui piani 1-2, 2-3 e 3-4.
+```{r}
+# somma dei conteggi di tutti gli insegnamenti dello stesso corso di laurea:
+# ogni riga diventa il profilo lessicale di un corso di laurea
+dtm_grouped_by_degree <- dtm %>% 
+  group_by(Degree, School) %>% 
+  summarise_all(sum)
+
+pca_s <- prcomp(dtm_grouped_by_degree[,-c(1,2)], scale. = TRUE)
+
+s_12<- autoplot(pca_s, data = dtm_grouped_by_degree, colour = "School", main = "PCA sui dati standardizzati", label=T, cex=3)
+
+s_23 <- autoplot(pca_s,x =2, y = 3 ,colour = 'School', data = dtm_grouped_by_degree, size=3) +
+  ggtitle("PCA sui dati standardizzati") +
+  theme(
+    plot.title = element_text(size = 20),   # Increase title size
+    axis.title = element_text(size = 15),   # Increase axis titles size
+    axis.text = element_text(size = 12),    # Increase axis text size
+    legend.text = element_text(size = 12),  # Increase legend text size
+    legend.title = element_text(size = 15),  # Increase legend title size
+    legend.position="bottom")
+
+s_34<- autoplot(pca_s,x =3, y = 4 ,colour = 'School', data = dtm_grouped_by_degree,  main = "PCA sui dati standardizati", label=T, cex=3)
+
+pca_ns <- prcomp(dtm_grouped_by_degree[,-c(1,2)], scale. = FALSE)
+ns_12 <- autoplot(pca_ns, colour = 'School', data = dtm_grouped_by_degree, main = "Non Scalato", label=T)
+
+ns_23 <- autoplot(pca_ns,x =2, y = 3 ,colour = 'School', data = dtm_grouped_by_degree,  main = "Non Scalato", label=T)
+ns_34 <- autoplot(pca_ns,x =3, y = 4 ,colour = 'School', data = dtm_grouped_by_degree,  main = "Non Scalato", label=T)
+
+s_12
+ns_12
+
+s_23
+ns_23
+
+#s_34
+#ns_34
+```
+
+## k-means PCA
+
+Tentativo di clustering non supervisionato: un k-means con otto centri, tanti
+quante le Scuole, proiettato sul piano delle prime due componenti principali.
+Se i cluster coincidessero con le Scuole, il testo le separerebbe da solo.
+```{r eval=FALSE, include=FALSE}
+library(cluster)
+set.seed(123)
+km_pca <- kmeans(x=dtm_grouped_by_degree[,-c(1,2)],centers=8,nstart=20)
+
+df <- data.frame(X=pca_s$x[,1], Y=pca_s$x[,2], cluster=as.factor(km_pca$cluster), School=as.factor(dtm_grouped_by_degree$School), Degree=as.factor(dtm_grouped_by_degree$Degree))
+
+with(df, plot(X, Y, col=cluster, pch=as.numeric(School), xlab="1° componente principale", ylab="2° componente principale", main="Clustering sul piano delle PCA"))
+
+custom_shapes <- c(0, 1, 2, 3, 4, 5, 6, 7)  # Specify shapes for up to 8 classes
+
+# Plot with ggplot2
+ggplot(df, aes(x = X, y = Y, color = cluster, shape = School)) +
+  geom_point(size = 3, alpha = 0.7) +
+  scale_shape_manual(values = custom_shapes) +  # Use custom shapes
+  labs(
+    title = "Clustering sul piano delle PCA",
+    x = "1° componente principale",
+    y = "2° componente principale"
+  ) +
+  theme_minimal() +  # A clean theme
+  theme(
+    plot.title = element_text(hjust = 0.5, size = 16, face = "bold"),
+    legend.position = "right"
+  )
+```
+Alcuni cluster sono degeneri
+```{r}
+# clustering gerarchico con il metodo di Ward sulle distanze euclidee: il
+# dendrogramma mostra come si aggregano i corsi di laurea
+dist.eucl <- dist(dtm_grouped_by_degree[,-c(1,2)])
+ward.pca <- hclust(dist.eucl,method='ward.D2')
+plot(ward.pca)
+```
+
+
+# t-SNE
+
+Il t-SNE cerca una proiezione in due dimensioni che conservi le vicinanze
+locali, quindi separa i gruppi meglio della PCA quando la struttura non e'
+lineare. `perplexity = 8` e' adatta a un campione piccolo come questo.
+```{r}
+library(Rtsne)
+set.seed(123)
+tsne_dtm <- dtm_grouped_by_degree[,-c(1,2)] %>% Rtsne(dims = 2, perplexity=8, max_iter = 1000)
+
+tsne_df <- data.frame("X"=tsne_dtm$Y[,1], "Y"=tsne_dtm$Y[,2], "School"=dtm_grouped_by_degree$School, ID=as.character(1:nrow(dtm_grouped_by_degree)))
+
+set.seed(123)
+x11()
+ggplot(tsne_df, aes(x = X, y = Y, color = School)) + 
+  geom_point(show.legend = TRUE, size=3) +
+  theme_minimal() +
+  labs(title = "t-SNE Plot with Text Labels") +
+  theme(legend.position="bottom")
+```
+
+## k-mean t-sne
+
+Gli stessi cluster del k-means, questa volta sul piano del t-SNE.
+```{r eval=FALSE, include=FALSE}
+df$X <- tsne_dtm$Y[,1]
+df$Y <- tsne_dtm$Y[,2]
+
+ggplot(df, aes(x = X, y = Y, color = cluster, shape = School)) +
+  geom_point(size = 3, alpha = 0.7) +
+  scale_shape_manual(values = custom_shapes) +  # Use custom shapes
+  labs(
+    title = "Clustering sul piano delle PCA",
+    x = "1° componente principale",
+    y = "2° componente principale"
+  ) +
+  theme_minimal() +  # A clean theme
+  theme(
+    plot.title = element_text(hjust = 0.5, size = 16, face = "bold"),
+    legend.position = "right" )
+```
+
+# Rimozione outliers
+
+Due corsi di laurea risultavano molto distanti da tutti gli altri: qui si
+provava a eliminare tutte le osservazioni appartenenti a quei corsi.
+```{r eval=FALSE, include=FALSE}
+outl <- c(36,16)
+dat[outl,]
+
+outl_degree = dat$Degree[outl]
+
+to_drop = rep(FALSE, nrow(dat))
+for (d in outl_degree){
+  to_drop = to_drop | (dat$Degree == d)
+}
+
+dat <- dat[!to_drop,]
+dim(dat)
+```
+
+
+# Addattamento dei modelli
+
+DI seguito vengono adattati dei modelli per i contenuti
+
+I modelli lavorano sulle singole unita' statistiche, non sui dati aggregati,
+quindi `Degree` viene rimossa. `initial_split` con `strata = School` divide in
+training e test mantenendo in entrambi la stessa composizione per Scuola, cosa
+che conta parecchio qui: Giurisprudenza e' appena il 4% delle osservazioni.
+```{r}
+dtm <- dtm %>% mutate(Degree=NULL)
+
+set.seed(789)
+split <- initial_split(dtm, strata=School)
+train <- training(split)
+test  <- testing(split)
+split
+```
+
+
+## Alberi di classificazione
+
+```{r CART}
+# rpart con minbucket = 10 impone almeno 10 osservazioni per foglia, cp = .002
+# e' la soglia di miglioramento sotto la quale non si apre un nuovo nodo, e
+# xval = 10 chiede la cross validation a 10 gruppi
+set.seed(123)
+t1 <- rpart(School ~ ., data = train, method= "class", control = rpart.control(minbucket = 10, cp = .002, xval = 10))
+#rpart.plot(t1, type=0)
+
+# matrice di confusione con prop.table(conf1, 2): normalizzando per colonna si
+# legge, per ogni Scuola vera, come sono distribuite le previsioni
+pred_t1 <- predict(t1, newdata = test, type = "class")
+conf1 <- table(Predicted = pred_t1, Actual = test$School)
+View(prop.table(conf1,2))
+
+# sulle righe i veri valori
+# sulle colonne i fittati
+#t
+#(t / rowSums(t))
+
+# accuratezza: quota di osservazioni sulla diagonale, cioe' classificate bene
+acc1 <- sum(diag(conf1))/length(pred_t1)
+acc1
+```
+
+### Potatura
+
+
+```{r CART_potatura}
+# plotcp mostra l'errore in cross validation al variare del parametro di
+# complessita': la sesta riga della cptable e' il livello di potatura scelto,
+# oltre il quale l'errore scende troppo lentamente per giustificare le foglie
+# in piu'. L'albero potato e' piu' piccolo e leggibile a colpo d'occhio.
+plotcp(t1)
+
+t2 <- prune(t1, cp= t1$cptable[6,1])
+x11()
+rpart.plot(t2, fallen.leaves = FALSE)
+
+pred_t2 <- predict(t2, newdata = test, type = "class")
+conf2 <- table(Predicted = pred_t2, Actual = test$School)
+
+View(prop.table(conf2, 2))
+
+acc2 <- sum(diag(conf2))/length(pred_t2)
+acc2
+
+library(rattle)
+fancyRpartPlot(t2)
+```
+
+## LDA
+
+```{r LDA_1}
+# Latent Dirichlet Allocation: si cercano K = 10 topic latenti nel corpus, con
+# I = 3000 iterazioni del campionatore. lexicalize costruisce il vocabolario e
+# word.counts conta le occorrenze di ogni termine; istogramma ed ECDF servono
+# a decidere dove tagliare le parole troppo rare e quella troppo frequente.
+library(lda)
+set.seed(123)
+N <- nrow(dat)
+N
+K <- 10
+K
+I <- 3*1e+3
+
+corpus <- lexicalize(dat$full.text, sep = " ")
+head(corpus$vocab)
+n_voc <- word.counts(corpus$documents, corpus$vocab)
+hist(n_voc, breaks = 100)
+data.frame(v=corpus$vocab,n=n_voc) %>% arrange(-n)
+# il primo è un outlier?
+plot(ecdf(n_voc))
+
+mean(n_voc==1)
+mean(n_voc<=15)
+```
+
+Teniamo la parola nel vocabolario se appare almeno 15 volte. Impostiamo come max 4300 per togliere l'outlier.
+
+```{r LDA_2, eval=FALSE, include=FALSE}
+# vocabolario filtrato: almeno 15 occorrenze per entrare, meno di 4300 per
+# escludere il termine fuori scala. Il campionatore di Gibbs collassato gira
+# con alpha ed eta a 0.1, distribuzioni a priori poco informative, e 100
+# iterazioni di burn-in scartate; la log-verosimiglianza serve a controllare
+# che la catena abbia raggiunto la convergenza.
+to_keep_voc <- corpus$vocab[ n_voc >= 15 & n_voc <4300 ]
+corpus <- lexicalize(dat$full.text,
+                     vocab=to_keep_voc)
+
+set.seed(12345)
+result <- lda.collapsed.gibbs.sampler(
+  documents = corpus,
+  K = K,
+  vocab = to_keep_voc,
+  num.iterations = I,
+  alpha = 0.1,
+  eta = 0.1,
+  burnin = 100,
+  compute.log.likelihood = TRUE
+)
+
+matplot(t(result$log.likelihoods),type="l")
+```
+
+Guardando le top parole scegliamo i titoli dei topic
+
+```{r LDA_2_top_words, eval=FALSE, include=FALSE}
+# le sei parole piu' caratteristiche di ogni topic, da cui sono stati scelti a
+# mano i dieci nomi qui sotto
+top_words <- top.topic.words(result$topics, num.words = 6, by.score = TRUE)
+top_words
+
+topic_names <- c("Chimica", "Medicina", "Matematica", "Diritto", "Biologia", "Agraria", "Economia", "Storia&Letteratura", "Fisica", "Pedagogia")
+```
+
+ID dei documenti "top" per ogni topic.
+
+```{r LDA_2_top_docs, eval=FALSE, include=FALSE}
+# i sei insegnamenti piu' rappresentativi di ciascun topic, per controllare
+# che i nomi scelti abbiano senso
+top_docs <- top.topic.documents(result$document_sums, num.documents = 6, alpha = 0.1)
+
+dat$full.text[top_docs[,1]]
+
+dat[top_docs[,6],]
+```
+
+Vediamo per 10 u.s. casuali quali sono maggiore frequenza
+
+```{r LDA_3, eval=FALSE, include=FALSE}
+# proporzione di ogni topic in dieci insegnamenti estratti a caso: e' la
+# figura lDirichletA_random_sample.pdf del report, e mostra che molti
+# programmi mescolano piu' argomenti
+topic.proportions <- t(result$document_sums) / colSums(result$document_sums)
+set.seed(123)
+samp <- sample(1:N, 10)
+topic.proportions <- topic.proportions[samp, ]
+
+dim(topic.proportions)
+
+colnames(topic.proportions) <- topic_names
+
+topic.proportions.df <- reshape2::melt(
+  cbind(data.frame(topic.proportions), document = factor(samp)),
+  variable.name = "topic",
+  id.vars = "document"
+)
+
+ggplot(topic.proportions.df, aes(y = topic, x = value), ylab = "proportion") +
+  geom_bar(stat = "identity") +
+  facet_wrap( ~ document, ncol = 5)
+```
+
+# DTM piccola
+
+Qui la DTM viene ricostruita in versione ridotta: pesi TF semplici, cioe' i
+conteggi grezzi, e `removeSparseTerms(0.975)`, che tiene solo i termini
+presenti in almeno il 2.5% dei documenti. Molte meno colonne: e' la condizione
+per far convergere la rete neurale in tempi ragionevoli, e permette di leggere
+le regole dell'albero in termini di frequenze invece che di TF-IDF.
+```{r}
+set.seed(123)
+corpus <- VectorSource(dat$full.text) %>% Corpus
+dtm_small <- DocumentTermMatrix(corpus, control = list(removeNumbers = FALSE)) %>% removeSparseTerms(0.975) %>% as.matrix() %>% as.data.frame()
+
+dtm_small$School <- as.factor(dat$School)
+
+set.seed(123)
+split_small <- initial_split(dtm_small, strata=School)
+train_small <- training(split_small)
+test_small <- testing(split_small)
+split_small
+```
+
+## Linear discriminant analysis
+
+Analisi discriminante lineare sulla DTM ridotta, con `partimat` che disegna le
+regioni di classificazione su tre termini scelti come esempio.
+```{r}
+library(MASS)
+linearDA_train <- lda(School ~ ., data = train_small)
+
+linearDA_fitted <- predict(linearDA_train, newdata=test_small)
+
+t <- table(fitted=linearDA_fitted$class, true=as.numeric(test_small$School))
+
+t_marg <- prop.table(t, 2)
+
+sum(diag(t))/sum(t)
+
+train_small$School <-train_small$School %>% as.numeric() %>% as.factor()
+
+library(klaR)
+partimat(train_small$School ~ ., data = train_small[,c("animal", "stor", "funzion")], method = "lda", plot.matrix=TRUE)
+```
+
+## Rete Neurale
+
+Rete neurale con un solo layer nascosto da otto nodi. `entropy = TRUE` usa la
+log-verosimiglianza multinomiale come funzione di perdita, `decay = .1` e' la
+penalizzazione sui pesi che tiene a bada il sovradattamento, `MaxNWts` alza il
+tetto al numero di pesi ammessi. E' il modello piu' accurato del progetto, al
+prezzo di qualsiasi interpretabilita'.
+```{r NN, eval=FALSE, include=FALSE}
+library(nnet)
+set.seed(12421)
+
+nn1 <- nnet(School ~ ., data = train_small, size = 8, 
+            entropy =TRUE,  decay = .1,
+            MaxNWts = 1e+05, maxit = 50)
+
+pred_nn1 <- predict(nn1, newdata = test_small, type = "class")
+
+conf <- table(test_small$School, pred_nn1)
+View
+
+acc <- sum(diag(conf))/length(pred_nn1)
+acc
+```
+
+
+## VGLM
+
+Ultimo tentativo, rimasto aperto: un modello multinomiale con selezione
+stepwise delle variabili secondo AIC, prendendo la Scuola di Scienze come
+livello di riferimento.
+```{r eval=FALSE, include=FALSE}
+library(VGAM)
+library(MASS)
+train_vglm <- VGAM::vglm(School ~ 1, family=multinomial(refLevel = 'Scuola di Scienze'), data=train_small)
+train_vglm_full <- stepAIC(train_vglm, scope=~.)
+```
+

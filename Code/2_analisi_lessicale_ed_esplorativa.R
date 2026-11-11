@@ -1,19 +1,79 @@
+################################################################################
+#                                                                              #
+#   2_ANALISI_LESSICALE_ED_ESPLORATIVA.R                                       #
+#                                                                              #
+#   Secondo stadio della pipeline: dal dataset ripulito al corpus pronto per   #
+#   la modellazione, passando per stemming, n-grammi e analisi esplorativa.    #
+#                                                                              #
+#   Input  : ../Datasets/unipd_courses_cleaned.Rdata   (2092 u.s.)             #
+#   Output : ../Datasets/unipd_courses_vFinale.Rdata                           #
+#                                                                              #
+#   Struttura dello script                                                     #
+#   ---------------------                                                      #
+#     1. costruzione di full.text, l'unione dei due campi del Syllabus su cui  #
+#        si lavora da qui in avanti (diventa la settima colonna di dat);       #
+#     2. prima rappresentazione: istogramma delle parole frequenti e           #
+#        wordcloud sul corpus intero;                                          #
+#     3. stemming italiano e rimozione delle parole comuni a tutte le Scuole;  #
+#     4. unione dei bigrammi e dei trigrammi in token singoli;                 #
+#     5. salvataggio del corpus definitivo;                                    #
+#     6. analisi esplorativa Scuola per Scuola: wordcloud, istogrammi e        #
+#        ricerca di bigrammi per ciascuna delle otto Scuole.                   #
+#                                                                              #
+#   Perche' unire gli n-grammi                                                 #
+#   --------------------------                                                 #
+#   La document-term matrix tratta ogni parola come indipendente dalle altre,  #
+#   percio' "unione europea" diventerebbe due token qualsiasi. Sostituendo la  #
+#   coppia con "unione_europea" la locuzione sopravvive come termine unico e   #
+#   mantiene il suo potere discriminante tra le Scuole. Le liste che seguono   #
+#   sono state compilate a mano guardando i bigrammi e i trigrammi piu'        #
+#   frequenti del corpus.                                                      #
+#                                                                              #
+#   Nota sulla seconda metà dello script                                       #
+#   -----------------------------------                                        #
+#   Dalla sezione "Analisi esplorativa" in avanti alcune righe usano oggetti   #
+#   con suffisso 2 (tidy_amv2, text_esp2, ...) che non vengono costruiti qui:  #
+#   appartengono a un secondo insieme di testi esplorato a parte e le righe    #
+#   sono rimaste come traccia di quel lavoro. Le righe con suffisso 1 sono     #
+#   quelle che girano su questo dataset.                                       #
+#                                                                              #
+#   Autori: Andrea Cocco, Andrea Quartuccio, Luca Varotto                      #
+#   Esame di Metodi Statistici per i Big Data - Universita' di Padova          #
+#                                                                              #
+################################################################################
 rm(list=ls())
 
+
+# tidyverse e tidytext per la manipolazione del testo in formato "tidy", una
+# riga per parola; tidymodels serve negli stadi successivi; TextWiller mette a
+# disposizione normalizzaTesti(), che uniforma maiuscole, accenti e
+# punteggiatura dei testi italiani.
 library(tidyverse)
 library(tidytext)
 library(tidymodels)
 library(TextWiller)
 
-load("unipd_courses_cleaned.Rdata")
 
+# il dataset uscito da 1_pulizia_dataset.R
+load("../Datasets/unipd_courses_cleaned.Rdata")
+
+
+# le stringhe vuote tornano NA, e se ne misura la quota colonna per colonna
 dat[dat==""] <- NA
 apply(dat, 2, function(x) mean(is.na(x)))
 
 glimpse(dat)
 
+
+# I due campi del Syllabus vengono uniti in un unico testo: per riconoscere la
+# Scuola conta il vocabolario complessivo dell'insegnamento, non quale dei due
+# campi contenga una parola. full.text e' la settima colonna di dat, quella a
+# cui il resto dello script si riferisce come dat[, 7].
 dat <- dat %>% mutate(full.text = paste(Contenuti, Conoscenze.e.abilita..da.acquisire))
 
+
+# normalizzazione: minuscole, accenti e punteggiatura uniformati, cosi' che la
+# stessa parola scritta in modi diversi diventi un solo token
 dat <- dat %>% mutate(
   full.text = normalizzaTesti(full.text)
 )
@@ -22,17 +82,31 @@ nrow(dat)
 
 # Rappresentazione ####
 
+
+# Prima occhiata al corpus: quali parole dominano, e quanto sono generiche.
+# E' questa lettura che motiva lo stemming e la rimozione di stopword fatti
+# subito dopo.
 library(wordcloud)
 library(colorspace)
 
+
+# unnest_tokens espande il testo in una riga per parola: il formato su cui
+# tutti i conteggi che seguono sono immediati
 tidy_text <- tibble(text = dat[, 7]) %>% unnest_tokens(word, text)
 
+
+# istogramma delle parole che superano lo 0.2% delle occorrenze totali;
+# x11() apre una finestra grafica separata, coord_flip() mette le parole
+# sull'asse verticale per renderle leggibili
 x11()
 tidy_text %>% 
   count(word, sort=TRUE) %>% 
   filter(n>(dim(tidy_text)[1]*0.002)) %>% mutate(word=reorder(word,n)) %>% 
   ggplot(aes(word,n)) + geom_col() + coord_flip()
 
+
+# wordcloud delle 100 parole piu' frequenti sopra le 500 occorrenze;
+# il seed fissa la disposizione casuale delle parole nella nuvola
 set.seed(123)
 word_counts <- tidy_text %>%
   count(word, sort = TRUE)
@@ -44,6 +118,9 @@ wordcloud::wordcloud(words = word_counts$word,
                      random.order = FALSE, 
                      colors = brewer.pal(8, "Dark2"))
 
+
+# coppie e terne di parole consecutive, ordinate per frequenza: sono la base
+# per compilare a mano le liste di n-grammi da unire piu' avanti
 bigrammi_text <- dat %>% 
   unnest_tokens(bigrammi,full.text,token='ngrams',n=2) %>% count(bigrammi, sort=T)
 
@@ -53,15 +130,25 @@ trigrammi_text <- dat %>%
 
 # Stemming ####
 
+
+# Stemming italiano: ogni parola viene ridotta alla radice, cosi' "corso",
+# "corsi" e "corsistica" collassano in un unico token. Dall'analisi
+# precedente erano emerse molte famiglie di parole con la stessa radice.
 library(tm)
 dat <- dat %>% mutate( full.text=stemDocument(full.text,
                                               language = "italian") )
 
+
+# si ricontano i token dopo lo stemming, per vedere cosa e' rimasto in testa
 tidy_text <- tibble(text = dat[, 7]) %>% unnest_tokens(word, text)
 View(tidy_text %>% table() %>% sort(decreasing = TRUE))
 
 # Stopword extra ####
 
+
+# Radici presenti in ogni Scuola, quindi inutili per discriminare: "cors",
+# "student", "conoscent", piu' la stringa "na" lasciata dai valori mancanti.
+# gsub le cancella dal testo di ogni osservazione.
 stop_list <- c("cors", "student", "conoscent", "na")
 
 for (word in stop_list){
@@ -74,10 +161,19 @@ for (word in stop_list){
 
 # Unione bigrammi ---------------------------------------------------------
 
+
+# i bigrammi vengono ricontati sul testo stemmato, perche' le liste qui sotto
+# vanno confrontate con le radici e non con le parole intere
 bigrammi_text <- dat %>% 
   unnest_tokens(bigrammi,full.text,token='ngrams',n=2) %>% 
   count(bigrammi, sort=T)
 
+
+# Ogni elemento della lista e' una coppia: cosa cercare e con cosa
+# sostituirlo. Le ultime voci, quelle con le classi di caratteri
+# [[:digit:]], non uniscono nulla: cancellano i riferimenti ai crediti, ai
+# CFU, alle ore e ai numeri di parte, che compaiono in ogni programma e non
+# dicono niente sulla materia.
 bigrammi <- list(c("unione europea", "unione_europea"),
                  c("diritti umani", "diritti_umani"),
                  c("guerra fredda", "guerra_fredda"),
@@ -156,6 +252,9 @@ bigrammi <- list(c("unione europea", "unione_europea"),
                  c("[[:digit:]]° credito", ""),
                  c("parte [[:digit:]]",""))
 
+
+# La sostituzione passa per stemDocument sul primo elemento: il testo e' ormai
+# stemmato, quindi il pattern da cercare va stemmato allo stesso modo.
 for (bigramma in bigrammi){
   dat <- dat %>% 
     mutate(full.text=
@@ -166,9 +265,14 @@ for (bigramma in bigrammi){
 
 # Trigrammi ####
 
+
+# stessa logica dei bigrammi, su terne di parole
 trigrammi_text <- dat %>% 
   unnest_tokens(bigrammi,full.text,token='ngrams',n=3) %>% count(bigrammi, sort=T)
 
+
+# I numeri nei commenti a fine riga sono le occorrenze del trigramma nel
+# corpus, il criterio con cui e' stato deciso se valeva la pena unirlo.
 trigrammi <- list(c("alimenti origine animale", 
                     "alimenti_origine_animale"), #15
                   c("prodotti origine animale", 
@@ -340,6 +444,8 @@ trigrammi <- list(c("alimenti origine animale",
                   c("tempi präsens perfekt",
                     "tempi_präsens_perfekt"))
 
+
+# Il ciclo e' identico a quello dei bigrammi.
 for (trigramma in trigrammi){
   dat <<- dat %>% 
     mutate(full.text=
@@ -354,21 +460,19 @@ for (trigramma in trigrammi){
 #t <- tidy_text %>% table()
 #t[t %like% "_"]
 
+
+# A questo punto il corpus e' definitivo: testo normalizzato, stemmato, senza
+# le parole comuni a tutte le Scuole e con gli n-grammi uniti. E' l'input di
+# 3_modellazione.Rmd.
 # Salva ####
-save(dat, file="unipd_courses_vFinale.Rdata")
+save(dat, file="../Datasets/unipd_courses_vFinale.Rdata")
+
+# valutazione ####
 
 
-
-
-
-
-
-
-
-
-# Parte 2: Analisi esplorativa ####
-## valutazione ####
-
+# Controllo finale: si rifanno wordcloud e istogramma sul corpus definitivo e
+# si cercano i token con l'underscore, cioe' gli n-grammi effettivamente
+# uniti, per verificare che le sostituzioni abbiano funzionato.
 tidy_text <- tibble(text = dat[, 7]) %>% unnest_tokens(word, text)
 
 wc_cono <- wordcloud(
@@ -396,10 +500,17 @@ trigrammi_text <- dat %>%
   count(trigrammi, sort=T)
 
 
-## Analisi esplorativa (Andrea Cocco) -----------------------------------------
+# Analisi esplorativa (Andrea Cocco) -----------------------------------------
 
 # Si pensava di fare text mining sia su tutti i corsi sia sui corsi specifici per le scuole
 # Una idea buona può essere fare un wordcloud per capire le tematiche più in voga per le varie scuole
+
+# Il corpus viene spezzato per Scuola, una variabile per ciascuna delle otto,
+# con le sigle: amv Agraria e Medicina Veterinaria, esp Economia e Scienze
+# politiche, g Giurisprudenza, i Ingegneria, mc Medicina e Chirurgia,
+# p Psicologia, s Scienze, susp Scienze umane, sociali e del patrimonio
+# culturale. L'idea e' leggere i temi dominanti Scuola per Scuola, invece che
+# sul corpus intero.
 text_amv1 <- data_frame(text=dat[dat$School=="Scuola di Agraria e Medicina Veterinaria",7])
 text_esp1 <- data_frame(text=dat[dat$School=="Scuola di Economia e Scienze politiche",7])
 text_g1 <- data_frame(text=dat[dat$School=="Scuola di Giurisprudenza",7])
@@ -409,6 +520,8 @@ text_p1 <- data_frame(text=dat[dat$School=="Scuola di Psicologia",7])
 text_s1 <- data_frame(text=dat[dat$School=="Scuola di Scienze",7])
 text_susp1 <- data_frame(text=dat[dat$School=="Scuola di Scienze umane, sociali e del patrimonio culturale",7])
 
+
+# ogni sottoinsieme viene portato in formato tidy, una riga per parola
 tidy_amv1 <- text_amv1 %>%
   unnest_tokens(word, text)
 tidy_esp1 <- text_esp1 %>%
@@ -426,6 +539,10 @@ tidy_s1 <- text_s1 %>%
 tidy_susp1 <- text_susp1 %>%
   unnest_tokens(word, text)
 
+
+# Da qui una wordcloud per Scuola, tutte con gli stessi parametri: almeno 10
+# occorrenze, al massimo 100 parole, palette Dark2 di RColorBrewer. Le figure
+# wordcloud_* del report nascono da questi blocchi.
 word_counts <- tidy_amv1 %>%
   count(word, sort = TRUE)
 wordcloud::wordcloud(words = word_counts$word, 
@@ -527,8 +644,12 @@ wordcloud(words = word_counts$word,
           random.order = FALSE, 
           colors = brewer.pal(8, "Dark2"))
 
-## Istogrammi ####
+# Istogrammi ####
 
+
+# Gli istogrammi delle parole sopra lo 0.2% delle occorrenze, Scuola per
+# Scuola: la stessa informazione delle wordcloud ma su una scala leggibile,
+# che permette di confrontare le frequenze.
 tidy_amv1 %>% 
   count(word, sort=TRUE) %>% 
   filter(n>(dim(tidy_amv1)[1]*0.002)) %>% 
@@ -615,8 +736,12 @@ tidy_susp2 %>%
   ggplot(aes(word,n)) + geom_col() + coord_flip()
 
 
-## Ricerca bigrammi --------------------------------------------------------
+# Ricerca bigrammi --------------------------------------------------------
 
+
+# I bigrammi piu' frequenti all'interno di ciascuna Scuola: serviva a
+# individuare le locuzioni specifiche di una disciplina da aggiungere alla
+# lista delle unioni.
 bigrammiamv1 <- text_amv1 %>% 
   unnest_tokens(bigrammi,text,token='ngrams',n=2) %>% 
   count(bigrammi, sort=T)
@@ -683,7 +808,13 @@ bigrammisusp2 <- text_susp2 %>%
 
 
 
-## Creare un vettore di parole inutili ####
+# Creare un vettore di parole inutili ####
+
+# Lista di parole da escludere dai grafici: articoli, preposizioni, verbi
+# della didattica ("acquisire", "comprendere", "riconoscere") e numeri, che
+# riempiono i primi posti delle classifiche senza dire nulla sulla materia.
+# I blocchi che seguono ripetono gli istogrammi filtrando con !word %in%
+# dizionario, e provano diversi ordinamenti delle barre per la figura finale.
 dizionario <- c("di", "le", "la", "delle", "della", "lo", "del", "dei", "studente", "il", "conoscenze", "degli", "corso", "principali", "con", "che", "ed", "base", "gli", "alla", "una", "al", "grado", "da", "comprendere", "sulle", "studenti", "particolare", "loro", "acquisire", "nel", "abilità", "sulla", "acquisisce", "alle", "conoscere", "studio", "essere", "caratteristiche", "agli", "nozioni", "capacità", "struttura", "fornire","3", "1", "riconoscere", "è", "dovrà", "sui", "competenze", "2", "nelle", "dati", "anche", "ai", "saper", "si", "attraverso", "credito", "cfu", "ore", "4", "cenni", "6", "5", "tra", "saranno", "strumenti", "conoscenza", "termine", "svilupperanno", "abilita", "loro", "conoscenze", "analizzare", "analitiche", "più", "utilizzare", "identificare", "interpretare", "applicare", "pratichegli", "cognitiveal", "trasversaligli", "anche", "fornire", "diversi", "nella", "fondamentali")
 tidy_amv1 %>% 
   count(word, sort=TRUE) %>% 
@@ -720,3 +851,19 @@ tidy_esp1 %>%
   ggplot(aes(word, n)) +
   geom_col() +
   coord_flip()
+
+
+# Stemming ####
+
+library(tm)
+
+# Stemming applicato ai due campi originali del Syllabus, tenuti separati,
+# oltre a full.text su cui si era lavorato finora.
+dat <- dat %>% mutate(
+  Conoscenze.e.abilita..da.acquisire=
+    stemDocument(Conoscenze.e.abilita..da.acquisire,
+                 language = "italian"),
+  
+  Contenuti=stemDocument(Conoscenze.e.abilita..da.acquisire,
+                         language = "italian")
+)
